@@ -36,6 +36,9 @@ class QueueCounter:
         # Queue areas - will be set by the user (polygon, color, name)
         self.queue_areas = []
         
+        # Cash counter areas - will be set by the user
+        self.cash_counters = []
+        
         # Tracking - simple ID assignment and track management
         self.next_id = 0
         self.tracks = {}
@@ -51,6 +54,14 @@ class QueueCounter:
         # Unique counts per queue
         self.unique_queue_counts = defaultdict(set)  # Format: {queue_idx: set(track_ids)}
         
+        # Cash counter tracking
+        self.counter_staff_times = {}  # Format: {counter_idx: {'staff_present': bool, 'last_change': time, 'total_empty': seconds, 'total_staffed': seconds}}
+        self.people_serviced = defaultdict(int)  # Format: {counter_idx: count}
+        self.being_serviced = defaultdict(set)  # Format: {counter_idx: set(track_ids)}
+        
+        # Store when people entered and exited each cash counter for service tracking
+        self.service_entry_times = {}  # Format: {counter_idx: {track_id: entry_time}}
+        
         # Fixed set of distinctive colors for queues
         self.color_palette = [
             (255, 0, 0),     # Red
@@ -63,6 +74,20 @@ class QueueCounter:
             (128, 0, 128),   # Purple
             (0, 128, 0),     # Dark Green
             (128, 0, 0),     # Maroon
+        ]
+        
+        # Fixed set of distinctive colors for cash counters (different from queue colors)
+        self.counter_color_palette = [
+            (0, 165, 255),   # Orange (BGR)
+            (255, 191, 0),   # Deep Sky Blue (BGR)
+            (238, 130, 238), # Violet (BGR)
+            (255, 105, 180), # Hot Pink (BGR)
+            (173, 255, 47),  # Green Yellow (BGR)
+            (64, 224, 208),  # Turquoise (BGR)
+            (255, 165, 0),   # Orange (BGR)
+            (218, 112, 214), # Orchid (BGR)
+            (152, 251, 152), # Pale Green (BGR)
+            (147, 112, 219), # Medium Purple (BGR)
         ]
 
     def add_queue_area(self, points, name=None):
@@ -90,13 +115,48 @@ class QueueCounter:
         
         return queue_idx
     
+    def add_cash_counter(self, points, name=None):
+        """
+        Add a cash counter area to track
+        
+        Args:
+            points (list): List of (x, y) coordinates defining the cash counter area
+            name (str): Optional name for this cash counter
+        
+        Returns:
+            int: Index of the added cash counter
+        """
+        counter_idx = len(self.cash_counters)
+        color = self.counter_color_palette[counter_idx % len(self.counter_color_palette)]
+        
+        if name is None:
+            name = f"Counter {counter_idx+1}"
+        
+        self.cash_counters.append({
+            'polygon': np.array(points, dtype=np.int32),
+            'color': color,
+            'name': name
+        })
+        
+        # Initialize counter statistics
+        self.counter_staff_times[counter_idx] = {
+            'staff_present': False,
+            'last_change': time.time(),
+            'total_empty': 0,
+            'total_staffed': 0
+        }
+        
+        self.service_entry_times[counter_idx] = {}
+        
+        return counter_idx
+    
     def is_point_in_polygon(self, point, polygon):
         """Check if a point is inside a polygon using OpenCV's pointPolygonTest"""
         return cv2.pointPolygonTest(polygon, point, False) >= 0
     
     def update_tracks(self, detections, frame_time):
         """
-        Update tracking information
+        Update tracking information with improved ID consistency
         
         Args:
             detections: List of [x1, y1, x2, y2, conf, cls]
@@ -125,43 +185,129 @@ class QueueCounter:
                 self.disappeared[self.next_id] = 0
                 self.next_id += 1
         else:
-            # Associate detections with existing tracks (simple IoU-based approach)
+            # Associate detections with existing tracks using multiple metrics
             track_ids = list(self.tracks.keys())
             track_boxes = np.array(list(self.tracks.values()))
+            
+            # Compute centers for all tracks and detections
+            track_centers = []
+            for track_id in track_ids:
+                bbox = self.tracks[track_id]
+                center_x = (bbox[0] + bbox[2]) // 2
+                center_y = (bbox[1] + bbox[3]) // 2
+                track_centers.append((center_x, center_y))
+            
+            detection_centers = []
+            for det in detections:
+                center_x = (det[0] + det[2]) // 2
+                center_y = (det[1] + det[3]) // 2
+                detection_centers.append((center_x, center_y))
             
             # Compute IoU between all tracks and detections
             matched_tracks = set()
             matched_detections = set()
             
-            for i, detection in enumerate(detections):
-                best_iou = 0.3  # IoU threshold
-                best_id = None
+            # Dictionary to store distance metrics for all possible matches
+            match_metrics = []
+            
+            # Calculate metrics for all track-detection pairs
+            for t_idx, track_id in enumerate(track_ids):
+                track_box = self.tracks[track_id]
+                track_center = track_centers[t_idx]
                 
-                for track_id in track_ids:
-                    if track_id in matched_tracks:
-                        continue
+                # Get track's recent trajectory (if available)
+                recent_trajectory = None
+                if track_id in self.track_history and len(self.track_history[track_id]) >= 2:
+                    recent_positions = self.track_history[track_id][-5:]  # Last 5 positions
+                    if len(recent_positions) >= 2:
+                        # Calculate average movement vector
+                        dx_sum = 0
+                        dy_sum = 0
+                        for i in range(1, len(recent_positions)):
+                            dx_sum += recent_positions[i][0] - recent_positions[i-1][0]
+                            dy_sum += recent_positions[i][1] - recent_positions[i-1][1]
                         
-                    track_box = self.tracks[track_id]
-                    iou = self.bbox_iou(detection, track_box)
-                    
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_id = track_id
+                        avg_dx = dx_sum / (len(recent_positions) - 1)
+                        avg_dy = dy_sum / (len(recent_positions) - 1)
+                        recent_trajectory = (avg_dx, avg_dy)
                 
-                if best_id is not None:
-                    # Update existing track
-                    self.tracks[best_id] = detection
-                    self.disappeared[best_id] = 0
-                    matched_tracks.add(best_id)
-                    matched_detections.add(i)
+                for d_idx, detection in enumerate(detections):
+                    det_center = detection_centers[d_idx]
+                    
+                    # Calculate IoU score
+                    iou = self.bbox_iou(track_box, detection)
+                    
+                    # Calculate center distance
+                    center_distance = np.sqrt((track_center[0] - det_center[0])**2 + 
+                                              (track_center[1] - det_center[1])**2)
+                    
+                    # Calculate size similarity (area ratio)
+                    track_area = (track_box[2] - track_box[0]) * (track_box[3] - track_box[1])
+                    det_area = (detection[2] - detection[0]) * (detection[3] - detection[1])
+                    area_ratio = min(track_area, det_area) / max(track_area, det_area)
+                    
+                    # Calculate trajectory consistency if available
+                    trajectory_score = 1.0  # Default score if no trajectory
+                    if recent_trajectory is not None:
+                        # Calculate expected position based on trajectory
+                        expected_x = track_center[0] + recent_trajectory[0]
+                        expected_y = track_center[1] + recent_trajectory[1]
+                        
+                        # Calculate how well the detection matches the expected position
+                        expected_distance = np.sqrt((expected_x - det_center[0])**2 + 
+                                                   (expected_y - det_center[1])**2)
+                        
+                        # Convert to a score (closer is better)
+                        max_expected_distance = 50  # Pixels
+                        trajectory_score = max(0, 1 - (expected_distance / max_expected_distance))
+                    
+                    # Calculate combined metric score
+                    # Weight different metrics based on importance
+                    iou_weight = 0.45
+                    distance_weight = 0.35
+                    size_weight = 0.1
+                    trajectory_weight = 0.1
+                    
+                    # For distance, convert to a score (closer is better)
+                    max_distance = 100  # Pixels
+                    distance_score = max(0, 1 - (center_distance / max_distance))
+                    
+                    # Calculate final score
+                    combined_score = (iou_weight * iou + 
+                                     distance_weight * distance_score + 
+                                     size_weight * area_ratio +
+                                     trajectory_weight * trajectory_score)
+                    
+                    # Store this potential match
+                    match_metrics.append((combined_score, t_idx, d_idx, track_id))
+            
+            # Sort matches by score (highest first)
+            match_metrics.sort(reverse=True)
+            
+            # Assign tracks to detections by greedy algorithm
+            for score, _, d_idx, track_id in match_metrics:
+                # Skip if either track or detection is already matched
+                if track_id in matched_tracks or d_idx in matched_detections:
+                    continue
+                
+                # Skip if score is too low
+                if score < 0.2:  # Threshold for matching
+                    continue
+                
+                # Update the track with this detection
+                detection = detections[d_idx]
+                self.tracks[track_id] = detection
+                self.disappeared[track_id] = 0
+                matched_tracks.add(track_id)
+                matched_detections.add(d_idx)
                     
                     # Add to track history
                     centerX = (detection[0] + detection[2]) // 2
                     centerY = (detection[1] + detection[3]) // 2
-                    self.track_history[best_id].append((centerX, centerY))
+                self.track_history[track_id].append((centerX, centerY))
                     # Limit history length
-                    if len(self.track_history[best_id]) > self.max_track_length:
-                        self.track_history[best_id] = self.track_history[best_id][-self.max_track_length:]
+                if len(self.track_history[track_id]) > self.max_track_length:
+                    self.track_history[track_id] = self.track_history[track_id][-self.max_track_length:]
             
             # Mark unmatched tracks as disappeared
             for track_id in track_ids:
@@ -247,206 +393,279 @@ class QueueCounter:
         queue_counts = {}
         in_queue_tracks = defaultdict(list)  # Format: {queue_idx: [track_ids]}
         
+        # Count people in cash counter areas
+        counter_counts = {}
+        in_counter_tracks = defaultdict(list)  # Format: {counter_idx: [track_ids]}
+        
+        # Track people being serviced
+        previously_serviced = {idx: set(self.being_serviced[idx]) for idx in range(len(self.cash_counters))}
+        for idx in range(len(self.cash_counters)):
+            self.being_serviced[idx] = set()
+        
         for track_id, bbox in tracks.items():
-            # Use center point to determine if in queue
-            center_x = (bbox[0] + bbox[2]) // 2
-            center_y = (bbox[1] + bbox[3]) // 2
-            center_point = (center_x, center_y)
+            # Get person center point
+            centerX = (bbox[0] + bbox[2]) // 2
+            centerY = (bbox[1] + bbox[3]) // 2
+            center_point = (centerX, centerY)
             
-            # Check each queue area
+            # Check if person is in any queue
             for queue_idx, queue_area in enumerate(self.queue_areas):
-                polygon = queue_area['polygon']
+                if self.is_point_in_polygon(center_point, queue_area['polygon']):
+                    in_queue_tracks[queue_idx].append(track_id)
                 
-                if self.is_point_in_polygon(center_point, polygon):
-                    # Initialize queue time tracking for this person if not already tracked
+                    # Track how long the person has been in this queue
                     if track_id not in self.person_queue_times:
                         self.person_queue_times[track_id] = {}
                     
-                    # Store first time seen in this queue if not already stored
+                    # Initialize the first time we see this person in this queue
                     if queue_idx not in self.person_queue_times[track_id]:
                         self.person_queue_times[track_id][queue_idx] = frame_time
                     
-                    # Calculate time spent in queue
-                    time_in_queue = frame_time - self.person_queue_times[track_id][queue_idx]
+            # Check if person is in any cash counter
+            for counter_idx, counter_area in enumerate(self.cash_counters):
+                if self.is_point_in_polygon(center_point, counter_area['polygon']):
+                    in_counter_tracks[counter_idx].append(track_id)
+                    self.being_serviced[counter_idx].add(track_id)
                     
-                    # If person has been in queue longer than buffer time, count them
-                    if time_in_queue >= self.buffer_time_seconds:
-                        in_queue_tracks[queue_idx].append(track_id)
-                        
-                        # Add to unique counts for this queue
-                        self.unique_queue_counts[queue_idx].add(track_id)
-                else:
-                    # If person is not in this queue anymore, reset their time
-                    if track_id in self.person_queue_times and queue_idx in self.person_queue_times[track_id]:
-                        del self.person_queue_times[track_id][queue_idx]
+                    # Initialize entry time for this person at this counter
+                    if track_id not in self.service_entry_times[counter_idx]:
+                        self.service_entry_times[counter_idx][track_id] = frame_time
         
-        # Calculate current counts for each queue
-        for queue_idx, tracks_in_queue in in_queue_tracks.items():
-            queue_counts[queue_idx] = len(tracks_in_queue)
+        # Process completed services (people who were at a counter but aren't anymore)
+        for counter_idx in range(len(self.cash_counters)):
+            # Find people who were being serviced but are no longer at the counter
+            serviced_people = previously_serviced[counter_idx] - self.being_serviced[counter_idx]
+            
+            # Increment the count of people serviced for each counter
+            self.people_serviced[counter_idx] += len(serviced_people)
+            
+            # Clean up entry times for people who have left
+            for track_id in serviced_people:
+                if track_id in self.service_entry_times[counter_idx]:
+                    del self.service_entry_times[counter_idx][track_id]
+        
+        # Update counter staff status
+        for counter_idx, counter_area in enumerate(self.cash_counters):
+            # Get current time for duration tracking
+            current_time = time.time()
+            
+            # Determine if staff is present (first person in the counter area is considered staff)
+            staff_present = len(in_counter_tracks[counter_idx]) > 0
+            
+            # If staff status changed, update timings
+            if staff_present != self.counter_staff_times[counter_idx]['staff_present']:
+                # Calculate duration since last change
+                duration = current_time - self.counter_staff_times[counter_idx]['last_change']
+                
+                # Update the appropriate counter
+                if self.counter_staff_times[counter_idx]['staff_present']:
+                    self.counter_staff_times[counter_idx]['total_staffed'] += duration
+                else:
+                    self.counter_staff_times[counter_idx]['total_empty'] += duration
+                
+                # Record the change
+                self.counter_staff_times[counter_idx]['staff_present'] = staff_present
+                self.counter_staff_times[counter_idx]['last_change'] = current_time
+        
+        # Apply buffer time to count people in queue
+        for queue_idx, track_ids in in_queue_tracks.items():
+            # Count people who've been in queue longer than buffer time
+            buffered_count = 0
+            
+            for track_id in track_ids:
+                queue_entry_time = self.person_queue_times[track_id].get(queue_idx, frame_time)
+                time_in_queue = frame_time - queue_entry_time
+                
+                # Only count if they've been in queue longer than buffer time
+                if time_in_queue >= self.buffer_time_seconds:
+                    buffered_count += 1
+                    # Add to unique counts set
+                    self.unique_queue_counts[queue_idx].add(track_id)
+            
+            queue_counts[queue_idx] = buffered_count
+        
+        # Store the count for each counter
+        for counter_idx in range(len(self.cash_counters)):
+            counter_counts[counter_idx] = len(in_counter_tracks[counter_idx])
         
         # Annotate frame
         annotated_frame = frame.copy()
         
         # Draw queue areas
         for queue_idx, queue_area in enumerate(self.queue_areas):
-            polygon = queue_area['polygon']
-            color = queue_area['color']
-            name = queue_area['name']
-            
-            # Draw polygon
-            cv2.polylines(annotated_frame, [polygon], True, color, 2)
+            cv2.polylines(annotated_frame, [queue_area['polygon']], True, queue_area['color'], 2)
             
             # Add queue name and count
-            count = queue_counts.get(queue_idx, 0)
-            unique_count = len(self.unique_queue_counts[queue_idx])
+            queue_count = queue_counts.get(queue_idx, 0)
+            text = f"{queue_area['name']}: {queue_count}"
             
-            # Calculate position for queue text - find the top-left point of the polygon
-            if len(polygon) > 0:
-                min_x = min(pt[0] for pt in polygon)
-                min_y = min(pt[1] for pt in polygon)
+            # Get a good position for the text (above the top-left corner of polygon)
+            min_x = min(point[0] for point in queue_area['polygon'])
+            min_y = min(point[1] for point in queue_area['polygon'])
                 text_pos = (min_x, min_y - 10)
-            else:
-                text_pos = (50, 50 + queue_idx * 30)
-                
-            cv2.putText(
-                annotated_frame,
-                f"{name}: {count} (Total: {unique_count})",
-                text_pos,
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2
-            )
+            
+            cv2.putText(annotated_frame, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.8, queue_area['color'], 2)
         
-        # Draw bounding boxes and track history
+        # Draw cash counter areas
+        for counter_idx, counter_area in enumerate(self.cash_counters):
+            cv2.polylines(annotated_frame, [counter_area['polygon']], True, counter_area['color'], 2)
+            
+            # Add counter name and staff status
+            staff_present = self.counter_staff_times[counter_idx]['staff_present']
+            staff_status = "Staff Present" if staff_present else "Empty"
+            
+            # Calculate timing information
+            staff_time = self.counter_staff_times[counter_idx]['total_staffed']
+            empty_time = self.counter_staff_times[counter_idx]['total_empty']
+            
+            # Get people serviced count
+            serviced_count = self.people_serviced[counter_idx]
+            
+            # Position for the counter name (above the bottom-left corner of polygon)
+            min_x = min(point[0] for point in counter_area['polygon'])
+            max_y = max(point[1] for point in counter_area['polygon'])
+            
+            name_pos = (min_x, max_y + 20)
+            status_pos = (min_x, max_y + 40)
+            serviced_pos = (min_x, max_y + 60)
+            time_pos = (min_x, max_y + 80)
+            
+            # Draw counter information
+            cv2.putText(annotated_frame, f"{counter_area['name']}", name_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, counter_area['color'], 2)
+            cv2.putText(annotated_frame, f"Status: {staff_status}", status_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, counter_area['color'], 2)
+            cv2.putText(annotated_frame, f"Serviced: {serviced_count}", serviced_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.7, counter_area['color'], 2)
+            
+            # Format times in minutes:seconds
+            staff_mins, staff_secs = divmod(int(staff_time), 60)
+            empty_mins, empty_secs = divmod(int(empty_time), 60)
+            
+            time_text = f"Staffed: {staff_mins}m{staff_secs}s | Empty: {empty_mins}m{empty_secs}s"
+            cv2.putText(annotated_frame, time_text, time_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, counter_area['color'], 2)
+        
+        # Draw tracks
         for track_id, bbox in tracks.items():
             x1, y1, x2, y2 = bbox[:4]
             
-            # Determine color based on which queue(s) the person is in
-            in_any_queue = False
-            box_color = (128, 128, 128)  # Default gray
+            # Determine color based on whether they're in a queue or at a counter
+            track_color = (0, 0, 0)  # Default black
             
-            for queue_idx, tracks_in_queue in in_queue_tracks.items():
-                if track_id in tracks_in_queue:
-                    box_color = self.queue_areas[queue_idx]['color']
-                    in_any_queue = True
+            # Check if person is in a queue
+            for queue_idx, queue_area in enumerate(self.queue_areas):
+                if track_id in in_queue_tracks[queue_idx]:
+                    track_color = queue_area['color']
+                    break
+            
+            # Check if person is at a counter (counter takes precedence for coloring)
+            for counter_idx, counter_area in enumerate(self.cash_counters):
+                if track_id in in_counter_tracks[counter_idx]:
+                    track_color = counter_area['color']
                     break
             
             # Draw bounding box
-            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 2)
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), track_color, 2)
             
-            # Draw ID
-            cv2.putText(
-                annotated_frame, 
-                f"ID: {track_id}", 
-                (x1, y1 - 10), 
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.5, 
-                box_color, 
-                2
-            )
+            # Add ID
+            cv2.putText(annotated_frame, f"ID: {track_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, track_color, 2)
             
-            # Draw trace path if available
+            # Draw track history (trails)
             if track_id in self.track_history and len(self.track_history[track_id]) > 1:
-                points = np.array(self.track_history[track_id], dtype=np.int32)
-                cv2.polylines(annotated_frame, [points], False, box_color, 2)
+                # Draw lines connecting previous positions
+                for i in range(1, len(self.track_history[track_id])):
+                    pt1 = self.track_history[track_id][i - 1]
+                    pt2 = self.track_history[track_id][i]
+                    cv2.line(annotated_frame, pt1, pt2, track_color, 2)
         
-        # Add total count info
-        total_people_in_queues = sum(queue_counts.values())
-        cv2.putText(
-            annotated_frame, 
-            f"Total people in queues: {total_people_in_queues}", 
-            (20, 40), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            0.8, 
-            (0, 255, 0), 
-            2
-        )
-        
-        return annotated_frame, queue_counts
+        return annotated_frame, queue_counts, counter_counts
     
     def process_video(self, video_path, output_path=None, display_every=0):
         """
-        Process a video file
+        Process a video file and count people in queue areas
         
         Args:
-            video_path (str): Path to the input video
-            output_path (str): Path to save the output video (None to not save)
-            display_every (int): Display every nth frame (0 for no display)
+            video_path (str): Path to input video
+            output_path (str): Path to save output video (optional)
+            display_every (int): How often to display/update during processing (0 = never)
         
         Returns:
-            dict: Queue counts over time {queue_idx: [counts]}
+            dict: Queue counts over time
         """
-        if not self.queue_areas:
-            print("No queue areas defined. Please define at least one queue area.")
-            # Define queue areas using grid method before processing
-            self.define_multiple_queue_areas(self.get_first_frame(video_path))
-        
+        # Open the video
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"Error: Could not open video file {video_path}")
+            return None
         
         # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Calculate buffer time in frames
-        self.buffer_frames = int(self.buffer_time_seconds * fps)
-        print(f"Buffer time set to {self.buffer_time_seconds} seconds ({self.buffer_frames} frames)")
-        
-        # Set up output video writer if needed
-        out = None
+        # Initialize output video writer if specified
         if output_path:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
-        # Dictionary to track counts per queue over time
-        queue_counts_over_time = defaultdict(list)
-        frame_count = 0
+        # Initialize queue tracking
+        frame_idx = 0
+        queue_counts_over_time = []
+        counter_counts_over_time = []
         
-        # Process each frame
+        # Process video frames
         while cap.isOpened():
+            # Read frame
             ret, frame = cap.read()
-            
             if not ret:
                 break
             
-            # Process the frame (use frame count as time measure)
-            annotated_frame, queue_counts = self.process_frame(frame, frame_count)
+            # Use frame index as timestamp (for buffer time tracking)
+            frame_time = frame_idx / fps
             
-            # Save counts for each queue
-            for queue_idx in range(len(self.queue_areas)):
-                queue_counts_over_time[queue_idx].append(queue_counts.get(queue_idx, 0))
+            # Process the frame
+            annotated_frame, queue_counts, counter_counts = self.process_frame(frame, frame_time)
             
-            # Save frame to output video if needed
-            if out:
+            # Store counts for plotting
+            queue_counts_over_time.append(queue_counts)
+            counter_counts_over_time.append(counter_counts)
+            
+            # Write to output video if specified
+            if output_path:
                 out.write(annotated_frame)
             
             # Display progress
-            if frame_count % 100 == 0:
-                counts_str = ", ".join([f"{q['name']}: {c}" for q, c in zip(self.queue_areas, 
-                                                                         [queue_counts.get(i, 0) for i in range(len(self.queue_areas))])])
-                print(f"Processing frame {frame_count}/{total_frames} - Counts: {counts_str}")
+            if display_every > 0 and frame_idx % display_every == 0:
+                cv2.imshow('Queue Detection', annotated_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
             
-            # Optionally display frames during processing (if display_every > 0)
-            if display_every > 0 and frame_count % display_every == 0:
-                plt.figure(figsize=(12, 8))
-                plt.imshow(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB))
-                plt.axis('off')
-                plt.show()
+            # Print progress
+            if frame_idx % 100 == 0:
+                print(f"Processing frame {frame_idx}/{total_frames} ({frame_idx/total_frames*100:.1f}%)")
+                
+                # Print queue information
+                for i, queue_area in enumerate(self.queue_areas):
+                    count = queue_counts.get(i, 0)
+                    print(f"  {queue_area['name']}: {count} people")
+                
+                # Print counter information
+                for i, counter_area in enumerate(self.cash_counters):
+                    staff_present = self.counter_staff_times[i]['staff_present']
+                    status = "Staff Present" if staff_present else "Empty"
+                    serviced_count = self.people_serviced[i]
+                    print(f"  {counter_area['name']}: {status}, Serviced: {serviced_count}")
             
-            frame_count += 1
+            # Increment frame counter
+            frame_idx += 1
         
-        # Release resources
+        # Clean up
         cap.release()
-        if out:
+        if output_path:
             out.release()
-            print(f"Output video saved to: {output_path}")
+        cv2.destroyAllWindows()
         
-        # Plot queue count over time
+        # Plot queue trends
         self.plot_queue_trends(queue_counts_over_time, fps)
         
-        # Return all counts
         return queue_counts_over_time
     
     def plot_queue_trends(self, queue_counts_over_time, fps):
@@ -683,3 +902,109 @@ class QueueCounter:
                 print(f"Invalid input format: {e}. Please try again.")
         
         return queue_points 
+
+    def define_cash_counter_areas(self, frame):
+        """
+        Interactive definition of cash counter areas in a frame
+        
+        Args:
+            frame: Image frame to display for selection
+        
+        Returns:
+            list: Indices of defined cash counter areas
+        """
+        # Clone frame for drawing
+        draw_frame = frame.copy()
+        
+        # Instructions
+        print("Define Cash Counter Areas:")
+        print("- Left-click to add points")
+        print("- Right-click to complete the current cash counter")
+        print("- Press 'q' to finish defining cash counters")
+        print("- Press 'c' to cancel the current cash counter")
+        
+        # Parameters for drawing
+        counter_indices = []
+        current_points = []
+        
+        # Mouse callback function
+        def mouse_callback(event, x, y, flags, param):
+            nonlocal current_points, draw_frame
+            
+            if event == cv2.EVENT_LBUTTONDOWN:
+                # Add point to current shape
+                current_points.append((x, y))
+                
+                # Redraw the frame
+                draw_frame = frame.copy()
+                
+                # Draw existing cash counters
+                for area in self.cash_counters:
+                    cv2.polylines(draw_frame, [area['polygon']], True, area['color'], 2)
+                    min_x = min(point[0] for point in area['polygon'])
+                    min_y = min(point[1] for point in area['polygon'])
+                    cv2.putText(draw_frame, area['name'], (min_x, min_y - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, area['color'], 2)
+                
+                # Draw current shape
+                if len(current_points) > 1:
+                    points_array = np.array(current_points, dtype=np.int32)
+                    cv2.polylines(draw_frame, [points_array], False, (0, 255, 255), 2)
+                    
+                # Draw all points
+                for pt in current_points:
+                    cv2.circle(draw_frame, pt, 5, (0, 255, 255), -1)
+            
+            elif event == cv2.EVENT_RBUTTONDOWN and len(current_points) > 2:
+                # Complete the current counter
+                counter_idx = self.add_cash_counter(current_points)
+                counter_indices.append(counter_idx)
+                
+                print(f"Added {self.cash_counters[counter_idx]['name']}")
+                
+                # Redraw the frame
+                draw_frame = frame.copy()
+                
+                # Draw all counters, including the new one
+                for area in self.cash_counters:
+                    cv2.polylines(draw_frame, [area['polygon']], True, area['color'], 2)
+                    min_x = min(point[0] for point in area['polygon'])
+                    min_y = min(point[1] for point in area['polygon'])
+                    cv2.putText(draw_frame, area['name'], (min_x, min_y - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, area['color'], 2)
+                
+                # Reset current points for the next counter
+                current_points = []
+        
+        # Create window and set mouse callback
+        cv2.namedWindow('Define Cash Counter Areas')
+        cv2.setMouseCallback('Define Cash Counter Areas', mouse_callback)
+        
+        # Main loop for cash counter definition
+        while True:
+            cv2.imshow('Define Cash Counter Areas', draw_frame)
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('q'):
+                # Finish defining cash counters
+                break
+            
+            elif key == ord('c'):
+                # Cancel current cash counter
+                current_points = []
+                
+                # Redraw the frame
+                draw_frame = frame.copy()
+                
+                # Draw existing cash counters
+                for area in self.cash_counters:
+                    cv2.polylines(draw_frame, [area['polygon']], True, area['color'], 2)
+                    min_x = min(point[0] for point in area['polygon'])
+                    min_y = min(point[1] for point in area['polygon'])
+                    cv2.putText(draw_frame, area['name'], (min_x, min_y - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, area['color'], 2)
+        
+        # Clean up
+        cv2.destroyAllWindows()
+        
+        return counter_indices 
