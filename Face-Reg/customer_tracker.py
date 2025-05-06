@@ -3,7 +3,7 @@ customer_tracker.py - Customer Recognition and Tracking Module
 
 This module handles detection, recognition, and tracking of customers.
 It differentiates between returning customers and new visitors, maintaining 
-tracking information for unknown faces to determine if they're frequent visitors.
+tracking information to determine if they're frequent visitors.
 """
 
 import cv2
@@ -17,13 +17,13 @@ from collections import defaultdict, deque
 from models import get_face_detector, get_embedding_model
 from face_processor import FaceProcessor
 from db_manager import db_manager
+from utils import draw_stylish_box
 
 # Initialize logger
 logger = logging.getLogger('face_recognition.customer')
 
 # Configuration
-UNKNOWN_FACE_TRACK_SECONDS = 1800  # 30 minutes before unknown face enrollment trigger
-UNKNOWN_FACE_RESET_SECONDS = 300  # 5 minutes before resetting tracking if face disappears
+CUSTOMER_FACE_RESET_SECONDS = 300  # 5 minutes before resetting tracking if face disappears
 
 class TrackedFace:
     """Class to hold tracking information for a detected face"""
@@ -78,17 +78,7 @@ class TrackedFace:
     @property
     def is_expired(self):
         """Check if tracking is expired"""
-        return time.time() - self.last_seen > UNKNOWN_FACE_RESET_SECONDS
-    
-    @property
-    def should_enroll(self):
-        """Check if this face should be enrolled as customer"""
-        return (
-            not self.identified and
-            self.total_time > UNKNOWN_FACE_TRACK_SECONDS and
-            self.frames_tracked > 50 and
-            self.quality_score > 0.5
-        )
+        return time.time() - self.last_seen > CUSTOMER_FACE_RESET_SECONDS
     
     @property
     def last_center(self):
@@ -123,7 +113,7 @@ class TrackedFace:
 
 
 class CustomerTracker:
-    """Customer tracking manager that handles recognition of customers and unknown faces"""
+    """Customer tracking manager that handles recognition of customers"""
     
     def __init__(self, detector_type="mtcnn", embedding_model="facenet", match_threshold=0.6):
         """
@@ -144,7 +134,7 @@ class CustomerTracker:
         
         # Face tracking state
         self.tracked_faces = {}  # Dictionary of tracked faces by ID
-        self.next_unknown_id = 0  # Counter for assigning temporary IDs
+        self.next_customer_id = 0  # Counter for assigning temporary IDs
         
         # Recognition stats
         self.recognition_count = 0
@@ -161,7 +151,7 @@ class CustomerTracker:
     
     def track_face(self, face_location, embedding, quality_score):
         """
-        Track an unknown face - determine if it's a new tracking entry or update existing
+        Track a face - determine if it's a new tracking entry or update existing
         
         Args:
             face_location: Face bounding box (top, right, bottom, left)
@@ -198,32 +188,24 @@ class CustomerTracker:
                 tx, ty = tracked.last_center
                 distance = np.sqrt((tx - face_center[0])**2 + (ty - face_center[1])**2)
                 
-                # Update best match
-                if distance < best_distance:
-                    best_distance = distance
+                # Consider it a match if within reasonable distance (half face width)
+                if distance < face_width / 2 and distance < best_distance:
                     best_match_id = face_id
+                    best_distance = distance
             
-            # Use existing track if good match found (within reasonable distance)
-            if best_match_id and best_distance < face_width * 0.8:
-                # Update tracking info
+            # If found, update the tracking
+            if best_match_id:
                 self.tracked_faces[best_match_id].update(face_location, embedding, quality_score)
                 return best_match_id
-            else:
-                # Create new tracking entry
-                self.next_unknown_id += 1
-                unknown_id = f"unknown_{self.next_unknown_id}"
-                
-                self.tracked_faces[unknown_id] = TrackedFace(
-                    unknown_id, face_location, embedding, quality_score
-                )
-                logger.debug(f"Started tracking new unknown face: {unknown_id}")
-                return unknown_id
+            
+            # If no match, create a new tracking ID
+            new_id = f"customer_{self.next_customer_id}"
+            self.next_customer_id += 1
+            self.tracked_faces[new_id] = TrackedFace(new_id, face_location, embedding, quality_score)
+            return new_id
     
     def _cleanup_expired_tracks(self):
-        """Remove expired tracking entries"""
-        current_time = time.time()
-        
-        # Collect expired IDs
+        """Remove expired face tracks"""
         expired_ids = []
         for face_id, tracked in self.tracked_faces.items():
             if tracked.is_expired:
@@ -336,7 +318,7 @@ class CustomerTracker:
                 
                 # Create result entry
                 result = {
-                    "type": "known_customer",
+                    "type": "customer",
                     "customer_id": customer_id,
                     "visit_count": customer_match.get("visitCount", 1),
                     "first_seen": customer_match.get("firstSeen", ""),
@@ -375,62 +357,46 @@ class CustomerTracker:
                 logger.info(f"Recognized customer: {customer_id} ({confidence:.2f})")
                 
             else:
-                # This is an unknown face, track it
+                # This is a new customer, register immediately
                 face_data = {
                     "embedding": embedding,
                     "embedding_list": embedding.tolist(),
                     "quality_score": quality_score
                 }
                 
-                # Update or create tracking
+                # Add as a new customer
+                customer = db_manager.add_new_customer(face_data, location)
+                
+                # Update tracking
                 tracking_id = self.track_face(face_loc, embedding, quality_score)
                 
-                # Check if it's time to enroll this face as a customer
+                # Mark as identified
                 with self.track_lock:
                     tracked_face = self.tracked_faces.get(tracking_id)
-                    
-                    if tracked_face.should_enroll:
-                        logger.info(f"Unknown face {tracking_id} tracked for sufficient time, enrolling as customer")
-                        
-                        # Add as a new customer
-                        customer = db_manager.add_new_customer(face_data, location)
-                        
-                        # Mark as identified
-                        tracked_face.identified = True
-                        tracked_face.identified_as = {
-                            "type": "customer",
-                            "id": customer["customerId"]
-                        }
-                        
-                        # Update stats
-                        with self.stats_lock:
-                            self.new_customers += 1
-                        
-                        # Create result entry
-                        result = {
-                            "type": "new_customer",
-                            "customer_id": customer["customerId"],
-                            "visit_count": 1,
-                            "confidence": 1.0,  # High confidence since we just created it
-                            "face_location": face_loc,
-                            "quality_score": quality_score,
-                            "tracking_id": tracking_id,
-                            "detection_time": datetime.now().isoformat(),
-                            "tracked_time": tracked_face.total_time
-                        }
-                    else:
-                        # Create result entry for unknown
-                        result = {
-                            "type": "unknown",
-                            "confidence": 0.0,
-                            "face_location": face_loc,
-                            "quality_score": quality_score,
-                            "tracking_id": tracking_id,
-                            "detection_time": datetime.now().isoformat(),
-                            "tracked_time": tracked_face.total_time
-                        }
+                    tracked_face.identified = True
+                    tracked_face.identified_as = {
+                        "type": "customer",
+                        "id": customer["customerId"]
+                    }
+                
+                # Update stats
+                with self.stats_lock:
+                    self.new_customers += 1
+                
+                # Create result entry
+                result = {
+                    "type": "customer",
+                    "customer_id": customer["customerId"],
+                    "visit_count": 1,
+                    "confidence": 1.0,  # High confidence since we just created it
+                    "face_location": face_loc,
+                    "quality_score": quality_score,
+                    "tracking_id": tracking_id,
+                    "detection_time": datetime.now().isoformat()
+                }
                 
                 tracked_customers.append(result)
+                logger.info(f"Registered new customer: {customer['customerId']}")
         
         return tracked_customers, face_locations
     
@@ -440,8 +406,7 @@ class CustomerTracker:
             return {
                 "total_tracked_faces": len(self.tracked_faces),
                 "identified_faces": sum(1 for f in self.tracked_faces.values() if f.identified),
-                "unknown_faces": sum(1 for f in self.tracked_faces.values() if not f.identified),
-                "potential_enrollments": sum(1 for f in self.tracked_faces.values() if f.should_enroll)
+                "customer_faces": len(self.tracked_faces)
             }
     
     def get_recognition_stats(self):
@@ -475,65 +440,48 @@ class CustomerTracker:
             Frame with tracking visualization
         """
         # Colors for different customer types
-        KNOWN_COLOR = (255, 0, 0)  # Blue (BGR)
-        NEW_COLOR = (0, 140, 255)  # Orange
-        UNKNOWN_COLOR = (0, 0, 255)  # Red
+        RETURNING_COLOR = (255, 128, 0)  # Vibrant orange-blue (BGR)
+        NEW_COLOR = (128, 0, 255)       # Purple
         
-        # Draw each tracked customer
+        # Make a copy to avoid modifying original
+        draw_frame = frame.copy()
+        
+        # Draw each tracked face
         for customer in tracked_customers:
+            # Get the face location
             face_loc = customer["face_location"]
-            top, right, bottom, left = face_loc
             
-            # Set color and label based on type
-            if customer["type"] == "known_customer":
-                color = KNOWN_COLOR
-                label = f"Customer #{customer['visit_count']}"
-                confidence = f"{customer['confidence']:.2f}"
-            elif customer["type"] == "new_customer":
-                color = NEW_COLOR
-                label = "New Customer"
-                confidence = f"{customer['confidence']:.2f}"
-            else:  # unknown
-                color = UNKNOWN_COLOR
-                tracked_time = customer.get("tracked_time", 0)
-                if tracked_time > 60:
-                    minutes = int(tracked_time // 60)
-                    label = f"Unknown ({minutes}m)"
-                else:
-                    label = "Unknown"
-                confidence = "?"
+            # Determine color based on visit count
+            visit_count = customer.get("visit_count", 1)
+            color = RETURNING_COLOR if visit_count > 1 else NEW_COLOR
             
-            # Draw box around face
-            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            # Create labels
+            customer_id = customer.get("customer_id", "N/A")
+            label = f"Customer {customer_id}"
             
-            # Add text background
-            text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.6, 1)[0]
-            cv2.rectangle(frame, (left, top - text_size[1] - 10), (left + text_size[0] + 10, top), color, -1)
-            cv2.putText(frame, label, (left + 5, top - 5), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+            # Create secondary text
+            secondary_text = None
+            if visit_count > 1:
+                secondary_text = f"Visit: {visit_count}"
             
-            # Add confidence
-            cv2.putText(frame, confidence, (left + 5, bottom + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # Use the stylish box utility
+            draw_frame = draw_stylish_box(
+                draw_frame, 
+                face_loc, 
+                label, 
+                color, 
+                confidence=customer.get("confidence", None),
+                secondary_text=secondary_text
+            )
             
-            # Draw tracking info for unknowns
-            if customer["type"] == "unknown" and "tracking_id" in customer:
-                track_id = customer["tracking_id"]
-                
-                # Draw motion path
-                with self.track_lock:
-                    if track_id in self.tracked_faces:
-                        track = self.tracked_faces[track_id]
-                        if len(track.center_points) > 1:
-                            # Draw motion path
-                            points = np.array(track.center_points, np.int32).reshape((-1, 1, 2))
-                            cv2.polylines(frame, [points], False, color, 1)
+            # Draw tracking line of movement (optional)
+            tracking_id = customer.get("tracking_id")
+            if tracking_id and tracking_id in self.tracked_faces:
+                tracked = self.tracked_faces[tracking_id]
+                if len(tracked.center_points) >= 2:
+                    # Draw path
+                    points = tracked.center_points
+                    for i in range(1, len(points)):
+                        cv2.line(draw_frame, points[i-1], points[i], color, 1, cv2.LINE_AA)
         
-        # Add tracking stats
-        tracking_stats = self.get_tracking_stats()
-        stats_text = f"Known: {tracking_stats['identified_faces']}  Unknown: {tracking_stats['unknown_faces']}"
-        cv2.putText(frame, stats_text, (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
-        # Add FPS
-        avg_fps = sum(self.fps_history) / len(self.fps_history) if self.fps_history else 0
-        cv2.putText(frame, f"FPS: {avg_fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        return frame 
+        return draw_frame 

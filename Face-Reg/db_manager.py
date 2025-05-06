@@ -26,12 +26,49 @@ STAFF_DB_FILE = f"{STORAGE_DIR}/staff_database.json"
 CUSTOMER_DB_FILE = f"{STORAGE_DIR}/customer_database.json"
 VISIT_LOG_FILE = f"{STORAGE_DIR}/visit_logs.json"
 
+# Ensure paths are absolute for reliable file operations
+STORAGE_DIR_ABS = os.path.abspath(STORAGE_DIR)
+CUSTOMER_DB_FILE = os.path.join(STORAGE_DIR_ABS, "customer_database.json")
+STAFF_DB_FILE = os.path.join(STORAGE_DIR_ABS, "staff_database.json")
+VISIT_LOG_FILE = os.path.join(STORAGE_DIR_ABS, "visit_logs.json")
+
 # Default thresholds - RELAXED for better matching
-STAFF_MATCH_THRESHOLD = 0.8  # Higher threshold means more lenient matching (was 0.6)
+STAFF_MATCH_THRESHOLD = 0.5  # Lower threshold means stricter matching (was 0.8)
 CUSTOMER_MATCH_THRESHOLD = 0.7  # Higher threshold means more lenient matching
 
 # Ensure directory exists
 os.makedirs(STORAGE_DIR, exist_ok=True)
+
+def ensure_file_permissions():
+    """Ensure all database files have proper permissions"""
+    # Make sure the directory exists and is writeable
+    if not os.path.exists(STORAGE_DIR_ABS):
+        os.makedirs(STORAGE_DIR_ABS, exist_ok=True)
+        print(f"Created storage directory: {STORAGE_DIR_ABS}")
+
+    # Check if customer database file exists, if not create it with an empty structure
+    if not os.path.exists(CUSTOMER_DB_FILE):
+        try:
+            with open(CUSTOMER_DB_FILE, 'w') as f:
+                json.dump({"customers": [], "customer_embeddings": []}, f, indent=4)
+            print(f"Created empty customer database file: {CUSTOMER_DB_FILE}")
+        except Exception as e:
+            print(f"Error creating customer database file: {e}")
+            
+    # Check if files are writeable
+    for file_path in [CUSTOMER_DB_FILE, STAFF_DB_FILE, VISIT_LOG_FILE]:
+        if os.path.exists(file_path):
+            # Check if file is writeable
+            if not os.access(file_path, os.W_OK):
+                try:
+                    # Try to make the file writeable
+                    os.chmod(file_path, 0o644)
+                    print(f"Updated permissions for: {file_path}")
+                except Exception as e:
+                    print(f"Error updating permissions for {file_path}: {e}")
+
+# Run permission check at startup
+ensure_file_permissions()
 
 class DatabaseManager:
     """Manager for all database operations"""
@@ -58,44 +95,78 @@ class DatabaseManager:
     
     def load_customer_db(self):
         """Load customer database from file"""
+        print(f"[CUSTOMER-DEBUG] Starting load_customer_db")
         with self.customer_db_lock:
+            print(f"[CUSTOMER-DEBUG] Acquired customer_db_lock for loading")
             if os.path.exists(CUSTOMER_DB_FILE):
+                print(f"[CUSTOMER-DEBUG] Customer database file exists: {CUSTOMER_DB_FILE}")
                 try:
+                    print(f"[CUSTOMER-DEBUG] Opening file for reading")
                     with open(CUSTOMER_DB_FILE, 'r') as f:
-                        return json.load(f)
+                        print(f"[CUSTOMER-DEBUG] Loading JSON data")
+                        data = json.load(f)
+                        print(f"[CUSTOMER-DEBUG] Successfully loaded customer database with {len(data.get('customers', []))} customers")
+                        return data
                 except Exception as e:
-                    logger.error(f"Error loading customer database: {str(e)}")
-                    self._initialize_customer_db()
-                    return {"customers": [], "customer_embeddings": []}
+                    error_msg = f"Error loading customer database: {str(e)}"
+                    logger.error(error_msg)
+                    print(f"[CUSTOMER-DEBUG] ERROR: {error_msg}")
+                    print(f"[CUSTOMER-DEBUG] Initializing new customer database")
+                    return self._initialize_customer_db()
             else:
+                print(f"[CUSTOMER-DEBUG] Customer database file not found, initializing new one")
                 return self._initialize_customer_db()
     
     def load_visit_logs(self):
         """Load visit logs from file"""
+        print(f"[VISIT-DEBUG] Starting load_visit_logs")
         with self.visit_log_lock:
+            print(f"[VISIT-DEBUG] Acquired visit_log_lock for loading")
             if os.path.exists(VISIT_LOG_FILE):
+                print(f"[VISIT-DEBUG] Visit logs file exists: {VISIT_LOG_FILE}")
                 try:
+                    print(f"[VISIT-DEBUG] Opening file for reading")
                     with open(VISIT_LOG_FILE, 'r') as f:
-                        return json.load(f)
+                        print(f"[VISIT-DEBUG] Loading JSON data")
+                        data = json.load(f)
+                        print(f"[VISIT-DEBUG] Successfully loaded visit logs with {len(data.get('visits', []))} entries")
+                        return data
                 except Exception as e:
-                    logger.error(f"Error loading visit logs: {str(e)}")
-                    self._initialize_visit_logs()
-                    return {"visits": [], "statistics": {"total_visits": 0, "unique_customers": 0, "repeat_customers": 0, "staff_entries": 0}}
+                    error_msg = f"Error loading visit logs: {str(e)}"
+                    logger.error(error_msg)
+                    print(f"[VISIT-DEBUG] ERROR: {error_msg}")
+                    print(f"[VISIT-DEBUG] Initializing new visit logs")
+                    return self._initialize_visit_logs()
             else:
+                print(f"[VISIT-DEBUG] Visit logs file not found, initializing new one")
                 return self._initialize_visit_logs()
     
     def _initialize_customer_db(self):
         """Initialize empty customer database"""
+        print(f"[CUSTOMER-DEBUG] Initializing empty customer database")
         db = {
             "customers": [],
             "customer_embeddings": []
         }
-        with open(CUSTOMER_DB_FILE, 'w') as f:
-            json.dump(db, f, indent=4)
-        return db
+        try:
+            print(f"[CUSTOMER-DEBUG] Creating empty database file")
+            # Ensure directory exists
+            if not os.path.exists(os.path.dirname(CUSTOMER_DB_FILE)):
+                print(f"[CUSTOMER-DEBUG] Creating directory: {os.path.dirname(CUSTOMER_DB_FILE)}")
+                os.makedirs(os.path.dirname(CUSTOMER_DB_FILE), exist_ok=True)
+                
+            with open(CUSTOMER_DB_FILE, 'w') as f:
+                json.dump(db, f, indent=4)
+                print(f"[CUSTOMER-DEBUG] Successfully created empty database file")
+            return db
+        except Exception as e:
+            print(f"[CUSTOMER-DEBUG] ERROR initializing database: {str(e)}")
+            # Return empty structure anyway so the system can continue
+            return db
     
     def _initialize_visit_logs(self):
         """Initialize empty visit logs"""
+        print(f"[VISIT-DEBUG] Initializing empty visit logs")
         logs = {
             "visits": [],
             "statistics": {
@@ -105,30 +176,214 @@ class DatabaseManager:
                 "staff_entries": 0
             }
         }
-        with open(VISIT_LOG_FILE, 'w') as f:
-            json.dump(logs, f, indent=4)
-        return logs
+        try:
+            print(f"[VISIT-DEBUG] Creating empty visit logs file")
+            # Ensure directory exists
+            if not os.path.exists(os.path.dirname(VISIT_LOG_FILE)):
+                print(f"[VISIT-DEBUG] Creating directory: {os.path.dirname(VISIT_LOG_FILE)}")
+                os.makedirs(os.path.dirname(VISIT_LOG_FILE), exist_ok=True)
+                
+            with open(VISIT_LOG_FILE, 'w') as f:
+                json.dump(logs, f, indent=4)
+                print(f"[VISIT-DEBUG] Successfully created empty visit logs file")
+            return logs
+        except Exception as e:
+            print(f"[VISIT-DEBUG] ERROR initializing visit logs: {str(e)}")
+            # Return empty structure anyway so the system can continue
+            return logs
     
     def save_customer_db(self, db):
         """Save customer database to file"""
+        print(f"[CUSTOMER-DEBUG] Starting save_customer_db with {len(db['customers'])} customers")
+        
+        # Create a debug log file to trace the issue
+        debug_log_path = f"{STORAGE_DIR}/customer_debug.log"
+        with open(debug_log_path, 'a') as debug_log:
+            debug_log.write(f"\n\n=== SAVE ATTEMPT at {datetime.now().isoformat()} ===\n")
+            debug_log.write(f"Customers count: {len(db['customers'])}\n")
+            debug_log.write(f"Embeddings count: {len(db.get('customer_embeddings', []))}\n")
+            
+            # Log first customer details if available
+            if db['customers']:
+                debug_log.write(f"First customer ID: {db['customers'][0].get('customerId', 'unknown')}\n")
+        
+        def convert_numpy_to_list(obj):
+            """Convert numpy arrays to lists in a nested structure"""
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy_to_list(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_to_list(item) for item in obj]
+            else:
+                return obj
+        
         with self.customer_db_lock:
             try:
+                print(f"[CUSTOMER-DEBUG] Acquired customer_db_lock for saving")
+                # Create directory if it doesn't exist
+                if not os.path.exists(os.path.dirname(CUSTOMER_DB_FILE)):
+                    print(f"[CUSTOMER-DEBUG] Creating directory: {os.path.dirname(CUSTOMER_DB_FILE)}")
+                    os.makedirs(os.path.dirname(CUSTOMER_DB_FILE), exist_ok=True)
+                
+                print(f"[CUSTOMER-DEBUG] Converting data to serializable format")
+                # Convert all numpy arrays to regular lists before serialization
+                db_cleaned = convert_numpy_to_list(db)
+                
+                # Add a backup file with the raw data
+                backup_file = f"{STORAGE_DIR}/customer_db_backup_{int(time.time())}.json"
+                print(f"[CUSTOMER-DEBUG] Saving backup to: {backup_file}")
+                with open(backup_file, 'w') as f:
+                    json.dump(db_cleaned, f, indent=4)
+                    print(f"[CUSTOMER-DEBUG] Backup file created successfully")
+                
+                print(f"[CUSTOMER-DEBUG] Opening file for writing: {CUSTOMER_DB_FILE}")
                 with open(CUSTOMER_DB_FILE, 'w') as f:
-                    json.dump(db, f, indent=4)
+                    print(f"[CUSTOMER-DEBUG] Dumping JSON to file")
+                    json.dump(db_cleaned, f, indent=4)
+                    print(f"[CUSTOMER-DEBUG] Successfully wrote customer database to file with {len(db_cleaned['customers'])} customers")
+                
+                # Verify the saved file
+                with open(debug_log_path, 'a') as debug_log:
+                    debug_log.write(f"Save completed. Verifying file...\n")
+                    if os.path.exists(CUSTOMER_DB_FILE):
+                        debug_log.write(f"File exists: {CUSTOMER_DB_FILE}, size: {os.path.getsize(CUSTOMER_DB_FILE)} bytes\n")
+                        try:
+                            with open(CUSTOMER_DB_FILE, 'r') as verify_file:
+                                verify_data = json.load(verify_file)
+                                debug_log.write(f"File loaded successfully. Contains {len(verify_data.get('customers', []))} customers\n")
+                        except Exception as e:
+                            debug_log.write(f"Error loading file for verification: {str(e)}\n")
+                    else:
+                        debug_log.write(f"ERROR: File does not exist after saving!\n")
+                
                 return True
             except Exception as e:
-                logger.error(f"Error saving customer database: {str(e)}")
+                error_msg = f"Error saving customer database: {str(e)}"
+                logger.error(error_msg)
+                print(f"[CUSTOMER-DEBUG] ERROR in save_customer_db: {error_msg}")
+                
+                # Log the error to the debug file
+                with open(debug_log_path, 'a') as debug_log:
+                    debug_log.write(f"ERROR in save_customer_db: {str(e)}\n")
+                    debug_log.write(f"Exception type: {type(e)}\n")
+                    # Get stack trace
+                    import traceback
+                    debug_log.write(f"Stack trace:\n{traceback.format_exc()}\n")
+                
+                # Try to diagnose the issue
+                print(f"[CUSTOMER-DEBUG] Diagnosing save error:")
+                try:
+                    # Check if the directory exists and is writable
+                    dir_path = os.path.dirname(CUSTOMER_DB_FILE)
+                    print(f"[CUSTOMER-DEBUG] Directory exists: {os.path.exists(dir_path)}")
+                    print(f"[CUSTOMER-DEBUG] Directory writable: {os.access(dir_path, os.W_OK)}")
+                    
+                    # Check if we have a very large database that might be causing issues
+                    customers_count = len(db.get("customers", []))
+                    embeddings_count = len(db.get("customer_embeddings", []))
+                    print(f"[CUSTOMER-DEBUG] Database size: {customers_count} customers, {embeddings_count} embedding records")
+                except Exception as diag_e:
+                    print(f"[CUSTOMER-DEBUG] Error during diagnosis: {str(diag_e)}")
+                
                 return False
     
     def save_visit_logs(self, logs):
         """Save visit logs to file"""
+        print(f"[VISIT-DEBUG] Starting save_visit_logs with {len(logs['visits'])} visits")
+        
+        # Create a debug log file to trace the issue
+        debug_log_path = f"{STORAGE_DIR}/visit_debug.log"
+        with open(debug_log_path, 'a') as debug_log:
+            debug_log.write(f"\n\n=== SAVE ATTEMPT at {datetime.now().isoformat()} ===\n")
+            debug_log.write(f"Visits count: {len(logs.get('visits', []))}\n")
+            
+            # Log statistics details
+            stats = logs.get('statistics', {})
+            debug_log.write(f"Statistics: total_visits={stats.get('total_visits', 0)}, " +
+                           f"unique_customers={stats.get('unique_customers', 0)}, " +
+                           f"repeat_customers={stats.get('repeat_customers', 0)}, " +
+                           f"staff_entries={stats.get('staff_entries', 0)}\n")
+        
+        def convert_numpy_to_list(obj):
+            """Convert numpy arrays to lists in a nested structure"""
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy_to_list(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_to_list(item) for item in obj]
+            else:
+                return obj
+        
         with self.visit_log_lock:
             try:
+                print(f"[VISIT-DEBUG] Acquired visit_log_lock for saving")
+                # Create directory if it doesn't exist
+                if not os.path.exists(os.path.dirname(VISIT_LOG_FILE)):
+                    print(f"[VISIT-DEBUG] Creating directory: {os.path.dirname(VISIT_LOG_FILE)}")
+                    os.makedirs(os.path.dirname(VISIT_LOG_FILE), exist_ok=True)
+                
+                print(f"[VISIT-DEBUG] Converting data to serializable format")
+                # Convert all numpy arrays to regular lists before serialization
+                logs_cleaned = convert_numpy_to_list(logs)
+                
+                # Comment out backup creation to save disk space and processing time
+                # # Add a backup file with the raw data
+                # backup_file = f"{STORAGE_DIR}/visit_logs_backup_{int(time.time())}.json"
+                # print(f"[VISIT-DEBUG] Saving backup to: {backup_file}")
+                # with open(backup_file, 'w') as f:
+                #     json.dump(logs_cleaned, f, indent=4)
+                #     print(f"[VISIT-DEBUG] Backup file created successfully")
+                
+                print(f"[VISIT-DEBUG] Opening file for writing: {VISIT_LOG_FILE}")
                 with open(VISIT_LOG_FILE, 'w') as f:
-                    json.dump(logs, f, indent=4)
+                    print(f"[VISIT-DEBUG] Dumping JSON to file")
+                    json.dump(logs_cleaned, f, indent=4)
+                    print(f"[VISIT-DEBUG] Successfully wrote visit logs to file with {len(logs_cleaned['visits'])} visits")
+                
+                # Verify the saved file
+                with open(debug_log_path, 'a') as debug_log:
+                    debug_log.write(f"Save completed. Verifying file...\n")
+                    if os.path.exists(VISIT_LOG_FILE):
+                        debug_log.write(f"File exists: {VISIT_LOG_FILE}, size: {os.path.getsize(VISIT_LOG_FILE)} bytes\n")
+                        try:
+                            with open(VISIT_LOG_FILE, 'r') as verify_file:
+                                verify_data = json.load(verify_file)
+                                debug_log.write(f"File loaded successfully. Contains {len(verify_data.get('visits', []))} visits\n")
+                        except Exception as e:
+                            debug_log.write(f"Error loading file for verification: {str(e)}\n")
+                    else:
+                        debug_log.write(f"ERROR: File does not exist after saving!\n")
+                
                 return True
             except Exception as e:
-                logger.error(f"Error saving visit logs: {str(e)}")
+                error_msg = f"Error saving visit logs: {str(e)}"
+                logger.error(error_msg)
+                print(f"[VISIT-DEBUG] ERROR in save_visit_logs: {error_msg}")
+                
+                # Log the error to the debug file
+                with open(debug_log_path, 'a') as debug_log:
+                    debug_log.write(f"ERROR in save_visit_logs: {str(e)}\n")
+                    debug_log.write(f"Exception type: {type(e)}\n")
+                    # Get stack trace
+                    import traceback
+                    debug_log.write(f"Stack trace:\n{traceback.format_exc()}\n")
+                
+                # Try to diagnose the issue
+                print(f"[VISIT-DEBUG] Diagnosing save error:")
+                try:
+                    # Check if the directory exists and is writable
+                    dir_path = os.path.dirname(VISIT_LOG_FILE)
+                    print(f"[VISIT-DEBUG] Directory exists: {os.path.exists(dir_path)}")
+                    print(f"[VISIT-DEBUG] Directory writable: {os.access(dir_path, os.W_OK)}")
+                    
+                    # Check if we have a very large file that might be causing issues
+                    visits_count = len(logs.get("visits", []))
+                    print(f"[VISIT-DEBUG] Logs size: {visits_count} visits")
+                except Exception as diag_e:
+                    print(f"[VISIT-DEBUG] Error during diagnosis: {str(diag_e)}")
+                
                 return False
     
     def find_matching_staff(self, face_embedding, threshold=STAFF_MATCH_THRESHOLD):
@@ -317,58 +572,143 @@ class DatabaseManager:
         Returns:
             The created customer record
         """
-        customer_db = self.load_customer_db()
+        print(f"[CUSTOMER-DEBUG] Starting add_new_customer")
         
-        # Generate a new customer ID
-        customer_id = f"CUST_{uuid.uuid4().hex[:8]}"
-        now = datetime.now().isoformat()
-        
-        # Create customer record
-        customer_record = {
-            "_id": str(uuid.uuid4()),
-            "customerId": customer_id,
-            "type": "anonymous",
-            "firstSeen": now,
-            "lastSeen": now,
-            "visitCount": 1,
-            "visitHistory": [{
-                "timestamp": now,
-                "location": location,
-                "duration": 0
-            }],
-            "status": "active"
-        }
-        
-        # Create embedding record
-        embedding_record = {
-            "_id": str(uuid.uuid4()),
-            "customerId": customer_id,
-            "embeddings": [{
-                "embeddingId": f"emb_{customer_id}_001",
-                "vector": face_data["embedding_list"] if "embedding_list" in face_data else face_data["embedding"],
-                "qualityScore": face_data.get("quality_score", 0.5),
-                "captureDate": now,
-                "location": location
-            }],
-            "modelVersion": "face_recognition_v1",
-            "vectorDimension": 128,
-            "lastUpdated": now
-        }
-        
-        # Add to database
-        with self.customer_db_lock:
+        try:
+            print(f"[CUSTOMER-DEBUG] Loading customer database")
+            customer_db = self.load_customer_db()
+            print(f"[CUSTOMER-DEBUG] Customer database loaded successfully")
+            
+            # Generate a new customer ID
+            customer_id = f"CUST_{uuid.uuid4().hex[:8]}"
+            now = datetime.now().isoformat()
+            print(f"[CUSTOMER-DEBUG] Generated new customer ID: {customer_id}")
+            
+            # Create customer record
+            print(f"[CUSTOMER-DEBUG] Creating customer record")
+            customer_record = {
+                "_id": str(uuid.uuid4()),
+                "customerId": customer_id,
+                "type": "anonymous",
+                "firstSeen": now,
+                "lastSeen": now,
+                "visitCount": 1,
+                "visitHistory": [{
+                    "timestamp": now,
+                    "location": location,
+                    "duration": 0
+                }],
+                "status": "active"
+            }
+            
+            # Create embedding record
+            print(f"[CUSTOMER-DEBUG] Creating embedding record")
+            try:
+                # Check embedding format
+                if "embedding_list" in face_data:
+                    print(f"[CUSTOMER-DEBUG] Using embedding_list from face_data - type: {type(face_data['embedding_list'])}")
+                    vector = face_data["embedding_list"]
+                else:
+                    print(f"[CUSTOMER-DEBUG] Using embedding from face_data - type: {type(face_data['embedding'])}")
+                    # If it's a numpy array, convert to list
+                    if hasattr(face_data["embedding"], "tolist"):
+                        vector = face_data["embedding"].tolist()
+                        print(f"[CUSTOMER-DEBUG] Converted numpy array to list")
+                    else:
+                        vector = face_data["embedding"]
+                
+                # Check if vector is valid
+                print(f"[CUSTOMER-DEBUG] Vector type: {type(vector)}, length: {len(vector) if hasattr(vector, '__len__') else 'unknown'}")
+                
+                embedding_record = {
+                    "_id": str(uuid.uuid4()),
+                    "customerId": customer_id,
+                    "embeddings": [{
+                        "embeddingId": f"emb_{customer_id}_001",
+                        "vector": vector,
+                        "qualityScore": face_data.get("quality_score", 0.5),
+                        "captureDate": now,
+                        "location": location
+                    }],
+                    "modelVersion": "face_recognition_v1",
+                    "vectorDimension": 128,
+                    "lastUpdated": now
+                }
+                print(f"[CUSTOMER-DEBUG] Embedding record created successfully")
+            except Exception as e:
+                print(f"[CUSTOMER-DEBUG] Error creating embedding record: {str(e)}")
+                embedding_record = {
+                    "_id": str(uuid.uuid4()),
+                    "customerId": customer_id,
+                    "embeddings": [{
+                        "embeddingId": f"emb_{customer_id}_001",
+                        "vector": [],  # Empty vector as fallback
+                        "qualityScore": 0.1,
+                        "captureDate": now,
+                        "location": location
+                    }],
+                    "modelVersion": "face_recognition_v1",
+                    "vectorDimension": 128,
+                    "lastUpdated": now
+                }
+                print(f"[CUSTOMER-DEBUG] Created fallback embedding record due to error")
+            
+            # Add to database
+            print(f"[CUSTOMER-DEBUG] Adding records to database")
+            # Ensure the structures exist
+            if "customers" not in customer_db:
+                print(f"[CUSTOMER-DEBUG] Creating missing 'customers' list")
+                customer_db["customers"] = []
+            if "customer_embeddings" not in customer_db:
+                print(f"[CUSTOMER-DEBUG] Creating missing 'customer_embeddings' list")
+                customer_db["customer_embeddings"] = []
+                
             customer_db["customers"].append(customer_record)
             customer_db["customer_embeddings"].append(embedding_record)
-            self.save_customer_db(customer_db)
-        
-        # Update statistics
-        with self.visit_log_lock:
-            visit_logs = self.load_visit_logs()
-            visit_logs["statistics"]["unique_customers"] += 1
-            self.save_visit_logs(visit_logs)
-        
-        logger.info(f"Added new customer: {customer_id}")
-        return customer_record
+            
+            # Save database directly, without using a lock (already in a function)
+            print(f"[CUSTOMER-DEBUG] Saving customer database")
+            save_result = self.save_customer_db(customer_db)
+            print(f"[CUSTOMER-DEBUG] Save result: {save_result}")
+            
+            # Verify the customer was added successfully
+            print(f"[CUSTOMER-DEBUG] Verifying customer was added")
+            verify_db = self.load_customer_db()
+            found = False
+            for customer in verify_db.get("customers", []):
+                if customer.get("customerId") == customer_id:
+                    found = True
+                    print(f"[CUSTOMER-DEBUG] Verification successful: customer {customer_id} found in database")
+                    break
+            if not found:
+                print(f"[CUSTOMER-DEBUG] WARNING: Customer {customer_id} not found in database after save!")
+                
+            # Update statistics
+            print(f"[CUSTOMER-DEBUG] Updating statistics")
+            with self.visit_log_lock:
+                print(f"[CUSTOMER-DEBUG] Loading visit logs")
+                visit_logs = self.load_visit_logs()
+                print(f"[CUSTOMER-DEBUG] Incrementing unique_customers count")
+                visit_logs["statistics"]["unique_customers"] += 1
+                print(f"[CUSTOMER-DEBUG] Saving visit logs")
+                save_logs_result = self.save_visit_logs(visit_logs)
+                print(f"[CUSTOMER-DEBUG] Save logs result: {save_logs_result}")
+            
+            print(f"[CUSTOMER-DEBUG] Successfully added new customer: {customer_id}")
+            return customer_record
+        except Exception as e:
+            print(f"[CUSTOMER-DEBUG] Critical error in add_new_customer: {str(e)}")
+            # Return a minimal valid customer record to prevent further errors
+            basic_id = f"CUST_ERROR_{uuid.uuid4().hex[:8]}"
+            print(f"[CUSTOMER-DEBUG] Returning emergency fallback customer record: {basic_id}")
+            return {
+                "customerId": basic_id,
+                "type": "error",
+                "firstSeen": datetime.now().isoformat(),
+                "lastSeen": datetime.now().isoformat(),
+                "visitCount": 1,
+                "status": "error"
+            }
     
     def update_customer(self, customer_match, face_data, location="Unknown"):
         """
@@ -463,9 +803,28 @@ class DatabaseManager:
         Returns:
             The created visit entry
         """
-        with self.visit_log_lock:
+        print(f"[VISIT-DEBUG] Starting log_recognition_event for {person_type} {person_id}")
+        
+        try:
+            print(f"[VISIT-DEBUG] Loading visit logs")
             visit_logs = self.load_visit_logs()
+            print(f"[VISIT-DEBUG] Visit logs loaded successfully")
+            
+            # Ensure structures exist
+            if "visits" not in visit_logs:
+                print(f"[VISIT-DEBUG] Creating missing 'visits' list")
+                visit_logs["visits"] = []
+            if "statistics" not in visit_logs:
+                print(f"[VISIT-DEBUG] Creating missing 'statistics' dictionary")
+                visit_logs["statistics"] = {
+                    "total_visits": 0,
+                    "unique_customers": 0,
+                    "repeat_customers": 0,
+                    "staff_entries": 0
+                }
+                
             now = datetime.now().isoformat()
+            print(f"[VISIT-DEBUG] Created timestamp: {now}")
             
             visit_entry = {
                 "visitId": str(uuid.uuid4()),
@@ -476,6 +835,8 @@ class DatabaseManager:
                 "location": location
             }
             
+            print(f"[VISIT-DEBUG] Created visit record with ID {visit_entry['visitId']}")
+            
             # Add to visit logs
             visit_logs["visits"].append(visit_entry)
             
@@ -485,9 +846,38 @@ class DatabaseManager:
             else:  # customer
                 visit_logs["statistics"]["total_visits"] += 1
             
+            print(f"[VISIT-DEBUG] Updated statistics")
+            
             # Save the updated logs
-            self.save_visit_logs(visit_logs)
+            print(f"[VISIT-DEBUG] Saving visit logs")
+            result = self.save_visit_logs(visit_logs)
+            print(f"[VISIT-DEBUG] Save result: {result}")
+            
+            # Verify the visit was logged successfully
+            print(f"[VISIT-DEBUG] Verifying visit was logged")
+            verify_logs = self.load_visit_logs()
+            found = False
+            for visit in verify_logs.get("visits", []):
+                if visit.get("visitId") == visit_entry["visitId"]:
+                    found = True
+                    print(f"[VISIT-DEBUG] Verification successful: visit {visit_entry['visitId']} found in logs")
+                    break
+            if not found:
+                print(f"[VISIT-DEBUG] WARNING: Visit {visit_entry['visitId']} not found in logs after save!")
+            
             return visit_entry
+        except Exception as e:
+            print(f"[VISIT-DEBUG] Critical error in log_recognition_event: {str(e)}")
+            # Return a minimal valid visit entry to prevent further errors
+            emergency_id = str(uuid.uuid4())
+            print(f"[VISIT-DEBUG] Returning emergency fallback visit record: {emergency_id}")
+            return {
+                "visitId": emergency_id,
+                "timestamp": datetime.now().isoformat(),
+                "type": person_type,
+                "personId": person_id,
+                "status": "error"
+            }
     
     def get_staff_info(self, staff_id):
         """

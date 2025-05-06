@@ -48,6 +48,9 @@ mtcnn_detector = MTCNN(
     keep_all=True
 )
 
+# Import utilities
+from utils import draw_stylish_box
+
 def load_database():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, 'r') as f:
@@ -246,94 +249,208 @@ def get_instruction_text(captured_count, face_angle=None):
         return "Almost done! Vary your expression slightly"
 
 
+def create_info_panel(captured_count, target_count):
+    """
+    Create a stylish info panel for enrollment progress
+    
+    Args:
+        captured_count: Number of faces captured so far
+        target_count: Target number of faces to capture
+        
+    Returns:
+        Styled info panel image
+    """
+    # Define panel size and colors
+    panel_width = 640
+    panel_height = 150
+    
+    # Colors
+    BACKGROUND = (30, 30, 30)
+    TEXT_COLOR = (255, 255, 255)
+    PROGRESS_BG = (50, 50, 50)
+    PROGRESS_FG = (0, 200, 100)
+    ACCENT = (0, 120, 255)
+    
+    # Create panel with dark background
+    panel = np.ones((panel_height, panel_width, 3), dtype=np.uint8) * 30
+    
+    # Add title with modern font
+    title = "Staff Enrollment Progress"
+    cv2.putText(panel, title, (20, 30), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.8, ACCENT, 2, cv2.LINE_AA)
+    
+    # Add progress text with clean font
+    progress_text = f"Captured: {captured_count}/{target_count} frames"
+    cv2.putText(panel, progress_text, (20, 60), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Calculate progress
+    progress = min(1.0, captured_count / target_count)
+    
+    # Draw modern progress bar
+    bar_width = int(panel_width * 0.8)
+    bar_height = 15
+    bar_x = int(panel_width * 0.1)
+    bar_y = 80
+    
+    # Draw rounded background bar
+    cv2.rectangle(panel, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), 
+                 PROGRESS_BG, cv2.FILLED, cv2.LINE_AA)
+    
+    # Draw filled progress
+    filled_width = int(bar_width * progress)
+    if filled_width > 0:
+        cv2.rectangle(panel, (bar_x, bar_y), (bar_x + filled_width, bar_y + bar_height), 
+                     PROGRESS_FG, cv2.FILLED, cv2.LINE_AA)
+    
+    # Add percentage
+    percent_text = f"{int(progress * 100)}%"
+    cv2.putText(panel, percent_text, (bar_x + bar_width + 10, bar_y + 12), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Add instructions
+    instructions = "Position your face in the guide box and follow the angle instructions"
+    cv2.putText(panel, instructions, (20, 120), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Add quit instruction
+    quit_text = "Press 'q' to quit"
+    text_size = cv2.getTextSize(quit_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+    cv2.putText(panel, quit_text, (panel_width - text_size[0] - 20, 120), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, ACCENT, 1, cv2.LINE_AA)
+    
+    return panel
+
+
 def capture_video(staff_id):
+    # Initialize video capture
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        print("Error: Could not open camera")
+        print("Error: Couldn't open camera.")
         return []
     
-    # Set camera properties
+    # Set lower resolution for faster processing
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
-    # Create directory for this staff member
+    # Create directory for staff face images
     staff_dir = os.path.join(FRAMES_DIR, staff_id)
-    if os.path.exists(staff_dir):
-        shutil.rmtree(staff_dir)
-    os.makedirs(staff_dir)
-            
-    # Variables to track captures
-    captured = []
-    last_time = time.time() - 10
-    interval = 1.0  # seconds between captures
+    os.makedirs(staff_dir, exist_ok=True)
     
-    print("Starting video capture. Press 'q' to stop or wait for auto-completion.")
+    # Set up tracking variables
+    last_time = time.time()
+    interval = 0.5  # seconds between captures
+    captured = []
+    target_angles = [
+        {"yaw": 0, "pitch": 0},    # Front
+        {"yaw": -30, "pitch": 0},  # Left
+        {"yaw": 30, "pitch": 0},   # Right
+        {"yaw": 0, "pitch": 15},   # Up
+        {"yaw": 0, "pitch": -15}   # Down
+    ]
+    
+    # Color definitions
+    RED = (0, 0, 255)
+    GREEN = (0, 255, 0)
+    BLUE = (255, 0, 0)
+    YELLOW = (0, 255, 255)
+    
+    print("Starting face capture. Press 'q' to stop.")
     
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("Failed to capture frame")
+            print("Error: Failed to grab frame.")
             break
-            
-        # Create a copy for drawing
-        display_frame = frame.copy()
-        h, w = display_frame.shape[:2]
         
-        # Convert to RGB for face_recognition
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Detect faces using MTCNN
-        locs, probs, _ = detect_faces_mtcnn(rgb)
+        # Get frame dimensions
+        h, w = frame.shape[:2]
         
         # Create info panel
-        info_panel = np.zeros((150, w, 3), dtype=np.uint8)
+        info_panel = create_info_panel(len(captured), TARGET_FRAMES)
         
-        # Add progress info
-        progress_text = f"Captured: {len(captured)}/{TARGET_FRAMES} frames"
-        cv2.putText(info_panel, progress_text, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2)
+        # Convert to RGB (face_recognition uses RGB)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # Draw progress bar
-        progress = min(1.0, len(captured) / TARGET_FRAMES)
-        bar_width = int(w * 0.8)
-        bar_height = 20
-        bar_x = int(w * 0.1)
-        bar_y = 50
-        # Background
-        cv2.rectangle(info_panel, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), WHITE, 1)
-        # Fill
-        filled_width = int(bar_width * progress)
-        cv2.rectangle(info_panel, (bar_x, bar_y), (bar_x + filled_width, bar_y + bar_height), GREEN, -1)
+        # Detect faces using MTCNN (faster than HOG for this purpose)
+        locs, probs, landmarks_list = detect_faces_mtcnn(rgb)
         
-        # Add instruction
-        instruction = get_instruction_text(len(captured))
-        cv2.putText(info_panel, instruction, (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, YELLOW, 2)
+        # Make a copy for display with instructions
+        display_frame = frame.copy()
         
-        # Display basic controls
-        cv2.putText(info_panel, "Press 'q' to quit", (w - 150, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1)
+        # Draw guide box to help position face
+        guide_padding = 50
+        guide_left = w // 2 - 100
+        guide_top = h // 2 - 125
+        guide_right = w // 2 + 100
+        guide_bottom = h // 2 + 125
         
-        # Process detected faces
+        # Draw stylish guide box with anti-aliased edges
+        cv2.rectangle(display_frame, (guide_left, guide_top), (guide_right, guide_bottom), BLUE, 1, cv2.LINE_AA)
+        
+        # Add corner markers for the guide box
+        corner_length = 20
+        line_thickness = 1
+        
+        # Top-left corner
+        cv2.line(display_frame, (guide_left, guide_top), (guide_left + corner_length, guide_top), BLUE, line_thickness, cv2.LINE_AA)
+        cv2.line(display_frame, (guide_left, guide_top), (guide_left, guide_top + corner_length), BLUE, line_thickness, cv2.LINE_AA)
+        
+        # Top-right corner
+        cv2.line(display_frame, (guide_right, guide_top), (guide_right - corner_length, guide_top), BLUE, line_thickness, cv2.LINE_AA)
+        cv2.line(display_frame, (guide_right, guide_top), (guide_right, guide_top + corner_length), BLUE, line_thickness, cv2.LINE_AA)
+        
+        # Bottom-left corner
+        cv2.line(display_frame, (guide_left, guide_bottom), (guide_left + corner_length, guide_bottom), BLUE, line_thickness, cv2.LINE_AA)
+        cv2.line(display_frame, (guide_left, guide_bottom), (guide_left, guide_bottom - corner_length), BLUE, line_thickness, cv2.LINE_AA)
+        
+        # Bottom-right corner
+        cv2.line(display_frame, (guide_right, guide_bottom), (guide_right - corner_length, guide_bottom), BLUE, line_thickness, cv2.LINE_AA)
+        cv2.line(display_frame, (guide_right, guide_bottom), (guide_right, guide_bottom - corner_length), BLUE, line_thickness, cv2.LINE_AA)
+        
+        # Display instruction text
+        instruction_text = get_instruction_text(len(captured))
+        
+        # Add instruction with styled text
+        cv2.putText(display_frame, instruction_text, (20, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.putText(display_frame, instruction_text, (20, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+        
+        # Process exactly one face
         if len(locs) == 1:
-            # Get the face location
-            top, right, bottom, left = locs[0]
+            face_location = locs[0]
+            top, right, bottom, left = face_location
             
-            # Draw rectangle around face
-            cv2.rectangle(display_frame, (left, top), (right, bottom), GREEN, 2)
+            # Get landmarks for the detected face
+            landmarks = get_facial_landmarks(rgb, face_location)
             
-            # Add face status text
-            cv2.putText(display_frame, "Face Detected", (left, top - 10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 2)
-            
-            # Get landmarks and draw them
-            landmarks = get_facial_landmarks(rgb, locs[0])
-            display_frame = draw_landmarks(display_frame, landmarks)
-            
-            # Estimate face angle
+            # Create label for the current angle
             angle = estimate_face_angle(landmarks)
             
-            # Display angle info
-            angle_text = f"Yaw: {angle['yaw']:.1f}, Pitch: {angle['pitch']:.1f}, Roll: {angle['roll']:.1f}"
-            cv2.putText(display_frame, angle_text, (left, bottom + 20), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, BLUE, 1)
+            # Determine which target angle we're working on
+            angle_index = min(len(captured) // 3, len(target_angles) - 1)
+            target = target_angles[angle_index]
+            
+            # Determine if the face is at a good angle for capture
+            yaw_diff = abs(angle["yaw"] - target["yaw"])
+            pitch_diff = abs(angle["pitch"] - target["pitch"])
+            good_angle = yaw_diff < 10 and pitch_diff < 10
+            
+            # Set color based on face position quality
+            box_color = GREEN if good_angle else YELLOW
+            
+            # Draw face box with the utility
+            label = "Face Detected"
+            angle_text = f"Yaw: {angle['yaw']:.1f}, Pitch: {angle['pitch']:.1f}"
+            
+            display_frame = draw_stylish_box(
+                display_frame, 
+                face_location, 
+                label, 
+                box_color, 
+                secondary_text=angle_text
+            )
             
             # Capture face if it's time
             now = time.time()
@@ -370,7 +487,11 @@ def capture_video(staff_id):
             else:
                 msg = "Multiple faces detected. Please ensure only one person is in frame."
                 
-            cv2.putText(display_frame, msg, (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, RED, 2)
+            # Add message with shadow for better readability
+            cv2.putText(display_frame, msg, (31, 71), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(display_frame, msg, (30, 70), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, RED, 2, cv2.LINE_AA)
         
         # Combine frame and info panel
         combined = np.vstack([display_frame, info_panel])

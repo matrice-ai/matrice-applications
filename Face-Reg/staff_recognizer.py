@@ -14,6 +14,7 @@ from datetime import datetime
 from models import get_face_detector, get_embedding_model
 from face_processor import FaceProcessor
 from db_manager import db_manager
+from utils import draw_stylish_box
 
 # Initialize logger
 logger = logging.getLogger('face_recognition.staff')
@@ -166,24 +167,28 @@ class StaffRecognizer:
         Returns:
             Frame with recognition visualization
         """
+        # Make a copy to avoid modifying original frame
+        result_frame = frame.copy()
+        
         # Draw each recognized staff member
         for staff in recognized_staff:
             face_loc = staff["face_location"]
-            top, right, bottom, left = face_loc
             
-            # Draw box around face
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            # Create label with name and position
+            label = f"{staff['name']}"
+            secondary_text = staff.get('position', '')
             
-            # Display name and position
-            label = f"{staff['name']} - {staff['position']}"
-            confidence = f"{staff['confidence']:.2f}"
+            # Staff members get a green color
+            color = (0, 230, 0)  # Slightly softer green in BGR
             
-            # Add text background
-            text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.6, 1)[0]
-            cv2.rectangle(frame, (left, top - text_size[1] - 10), (left + text_size[0] + 10, top), (0, 255, 0), -1)
-            cv2.putText(frame, label, (left + 5, top - 5), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
-            
-            # Add confidence
-            cv2.putText(frame, confidence, (left + 5, bottom + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            # Use the stylish box utility
+            result_frame = draw_stylish_box(
+                result_frame, 
+                face_loc, 
+                label, 
+                color, 
+                confidence=staff['confidence'],
+                secondary_text=secondary_text
+            )
         
-        return frame 
+        return result_frame 

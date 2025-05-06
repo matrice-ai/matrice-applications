@@ -98,14 +98,14 @@ def draw_landmarks(frame, landmarks):
     return frame
 
 
-def add_status_panel(frame, title, fps=None, stats=None):
+def add_status_panel(frame, title, fps, stats):
     """
-    Add a status panel at the bottom of the frame
+    Add a modern status panel with information to the frame
     
     Args:
-        frame: Frame to annotate
-        title: Panel title
-        fps: Optional FPS to display
+        frame: Input image frame
+        title: Title for the panel
+        fps: FPS value to display
         stats: Dictionary of statistics to display
         
     Returns:
@@ -113,35 +113,75 @@ def add_status_panel(frame, title, fps=None, stats=None):
     """
     h, w = frame.shape[:2]
     
-    # Create info panel
-    panel_height = 100 if stats else 60
-    info_panel = np.zeros((panel_height, w, 3), dtype=np.uint8)
+    # Copy the frame to avoid modifying original
+    display_frame = frame.copy()
     
-    # Add title
-    cv2.putText(info_panel, title, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLORS['white'], 2)
+    # Define panel parameters
+    panel_height = 30 + 20 * (len(stats) + 1)  # Title + stats
+    panel_width = 180
+    panel_x = 10
+    panel_y = 10
     
-    # Add FPS if provided
-    if fps is not None:
-        cv2.putText(info_panel, f"FPS: {fps:.1f}", (w - 120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS['white'], 2)
+    # Panel colors
+    BACKGROUND = (20, 20, 20)  # Dark gray
+    TITLE_COLOR = (0, 140, 255)  # Orange
+    TEXT_COLOR = (255, 255, 255)  # White
+    VALUE_COLOR = (200, 200, 200)  # Light gray
+    BORDER_COLOR = (60, 60, 60)  # Darker gray for border
     
-    # Add statistics if provided
-    if stats:
-        y_pos = 60
-        x_pos = 10
-        for key, value in stats.items():
-            text = f"{key}: {value}"
-            cv2.putText(info_panel, text, (x_pos, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLORS['white'], 1)
-            
-            # Move to next position
-            x_pos += 200
-            if x_pos > w - 200:
-                x_pos = 10
-                y_pos += 30
+    # Create panel with alpha blending
+    alpha = 0.7
+    overlay = display_frame.copy()
     
-    # Combine frame and panel
-    result = np.vstack([frame, info_panel])
+    # Draw panel background with rounded corners
+    cv2.rectangle(overlay, 
+                 (panel_x, panel_y), 
+                 (panel_x + panel_width, panel_y + panel_height), 
+                 BACKGROUND, -1)
+    cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
     
-    return result
+    # Add a thin border
+    cv2.rectangle(display_frame, 
+                 (panel_x, panel_y), 
+                 (panel_x + panel_width, panel_y + panel_height), 
+                 BORDER_COLOR, 1, cv2.LINE_AA)
+    
+    # Add title with separator line
+    cv2.putText(display_frame, title, 
+               (panel_x + 10, panel_y + 20), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, TITLE_COLOR, 1, cv2.LINE_AA)
+    
+    # Add horizontal separator
+    cv2.line(display_frame, 
+            (panel_x + 5, panel_y + 30), 
+            (panel_x + panel_width - 5, panel_y + 30), 
+            BORDER_COLOR, 1, cv2.LINE_AA)
+    
+    # Add FPS if available
+    y_offset = panel_y + 50
+    if fps > 0:
+        fps_color = (0, 255, 0) if fps > 20 else (0, 255, 255) if fps > 10 else (0, 0, 255)
+        fps_text = f"FPS: {fps:.1f}"
+        cv2.putText(display_frame, fps_text, 
+                   (panel_x + 10, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, fps_color, 1, cv2.LINE_AA)
+        y_offset += 20
+    
+    # Add stats
+    for i, (key, value) in enumerate(stats.items()):
+        # Key
+        cv2.putText(display_frame, f"{key}:", 
+                   (panel_x + 10, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, TEXT_COLOR, 1, cv2.LINE_AA)
+        
+        # Value
+        cv2.putText(display_frame, str(value), 
+                   (panel_x + 100, y_offset), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, VALUE_COLOR, 1, cv2.LINE_AA)
+        
+        y_offset += 20
+    
+    return display_frame
 
 
 # Time utilities
@@ -533,4 +573,113 @@ def write_json_file(data, filepath):
     except Exception as e:
         logger.error(f"Error writing to {filepath}: {e}")
     
-    return False 
+    return False
+
+
+def draw_stylish_box(frame, face_location, label, color, confidence=None, secondary_text=None):
+    """
+    Draw a stylish bounding box and text label on a face
+    
+    Args:
+        frame: Image frame to draw on
+        face_location: (top, right, bottom, left) coordinates
+        label: Text label to display
+        color: (B,G,R) color tuple for the box
+        confidence: Optional confidence score to display
+        secondary_text: Optional additional text to display below the box
+        
+    Returns:
+        Modified frame with stylish box and text
+    """
+    top, right, bottom, left = face_location
+    
+    # Make a copy to avoid modifying original
+    draw_frame = frame.copy()
+    
+    # Calculate face dimensions
+    face_width = right - left
+    face_height = bottom - top
+    
+    # Draw thinner, stylish box with anti-aliased edges
+    cv2.rectangle(draw_frame, (left, top), (right, bottom), color, 1, cv2.LINE_AA)
+    
+    # Add corner markers for a modern look
+    corner_length = min(30, face_width // 4, face_height // 4)
+    line_thickness = 2
+    
+    # Top-left corner
+    cv2.line(draw_frame, (left, top), (left + corner_length, top), color, line_thickness, cv2.LINE_AA)
+    cv2.line(draw_frame, (left, top), (left, top + corner_length), color, line_thickness, cv2.LINE_AA)
+    
+    # Top-right corner
+    cv2.line(draw_frame, (right, top), (right - corner_length, top), color, line_thickness, cv2.LINE_AA)
+    cv2.line(draw_frame, (right, top), (right, top + corner_length), color, line_thickness, cv2.LINE_AA)
+    
+    # Bottom-left corner
+    cv2.line(draw_frame, (left, bottom), (left + corner_length, bottom), color, line_thickness, cv2.LINE_AA)
+    cv2.line(draw_frame, (left, bottom), (left, bottom - corner_length), color, line_thickness, cv2.LINE_AA)
+    
+    # Bottom-right corner
+    cv2.line(draw_frame, (right, bottom), (right - corner_length, bottom), color, line_thickness, cv2.LINE_AA)
+    cv2.line(draw_frame, (right, bottom), (right, bottom - corner_length), color, line_thickness, cv2.LINE_AA)
+    
+    # Define font settings - use a cleaner font
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    font_thickness = 1
+    
+    # Calculate text size
+    (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+    
+    # Draw cleaner text label with gradient background
+    # Background with gradient alpha
+    alpha = 0.7
+    overlay = draw_frame.copy()
+    cv2.rectangle(overlay, 
+                 (left - 1, top - text_height - 12),
+                 (left + text_width + 10, top),
+                 color, -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, alpha, draw_frame, 1 - alpha, 0, draw_frame)
+    
+    # Draw text with shadow for better readability
+    shadow_offset = 1
+    cv2.putText(draw_frame, label, 
+               (left + 5 + shadow_offset, top - 5 + shadow_offset), 
+               font, font_scale, (0, 0, 0), font_thickness, cv2.LINE_AA)
+    cv2.putText(draw_frame, label, 
+               (left + 5, top - 5), 
+               font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
+    
+    # Add confidence if provided
+    if confidence is not None:
+        conf_text = f"{confidence:.2f}"
+        # Draw confidence as a small pill-shaped badge
+        (conf_width, conf_height), _ = cv2.getTextSize(conf_text, font, font_scale, font_thickness)
+        
+        # Draw confidence badge
+        badge_left = right - conf_width - 10
+        badge_top = bottom + 5
+        badge_right = right
+        badge_bottom = badge_top + conf_height + 10
+        
+        # Draw rounded rectangle badge
+        overlay = draw_frame.copy()
+        cv2.rectangle(overlay, 
+                     (badge_left - 5, badge_top),
+                     (badge_right + 5, badge_bottom),
+                     color, -1, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.7, draw_frame, 0.3, 0, draw_frame)
+        
+        # Add confidence text
+        cv2.putText(draw_frame, conf_text, 
+                   (badge_left, badge_bottom - 5), 
+                   font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
+    
+    # Add secondary text if provided
+    if secondary_text is not None:
+        # Draw below the face
+        cv2.putText(draw_frame, secondary_text, 
+                   (left, bottom + 20), 
+                   font, font_scale, color, font_thickness, cv2.LINE_AA)
+    
+    return draw_frame 
